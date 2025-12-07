@@ -27,7 +27,8 @@ BLEScan* pBLEScan;
 bool isPCOn() {
   // Read voltage divider - adjust threshold based on your setup
   int reading = analogRead(PC_STATUS_PIN);
-  return reading > 500;  // Tune this value
+  // Serial.printf("Reading from PC_STATUS_PIN: %d\n", reading);
+  return reading > 1000;  // Tune this value
 }
 
 void sendPowerSignal(String reason) {
@@ -146,13 +147,240 @@ void loadControllersFromFile() {
   Serial.println(" controller(s)\n");
 }
 
+bool validateMAC(String mac) {
+  // Length must be exactly 17 characters (xx:xx:xx:xx:xx:xx)
+  if (mac.length() != 17) {
+    return false;
+  }
+
+  // Check colons at positions 2, 5, 8, 11, 14
+  if (mac.charAt(2) != ':' || mac.charAt(5) != ':' ||
+      mac.charAt(8) != ':' || mac.charAt(11) != ':' ||
+      mac.charAt(14) != ':') {
+    return false;
+  }
+
+  // Check hex characters at all other positions
+  for (int i = 0; i < 17; i++) {
+    if (i % 3 == 2) continue; // Skip colon positions
+    char c = mac.charAt(i);
+    if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+void saveControllersToFile() {
+  if (!LittleFS.begin(true)) {
+    Serial.println("Failed to mount LittleFS, cannot save");
+    return;
+  }
+
+  File file = LittleFS.open(CONTROLLERS_FILE, "w");
+  if (!file) {
+    Serial.println("Failed to open controllers.txt for writing");
+    return;
+  }
+
+  // Write header comments
+  file.println("# Controller MAC Addresses");
+  file.println("# Add your Bluetooth controller MAC addresses here (one per line)");
+  file.println("# Lines starting with # are comments and will be ignored");
+  file.println("# Format: xx:xx:xx:xx:xx:xx (lowercase letters)");
+  file.println("#");
+  file.println("# To find your controller's MAC address:");
+  file.println("# - Windows: Settings → Bluetooth & devices → Click \"...\" → Properties");
+  file.println("# - macOS: Hold Option, click Bluetooth icon in menu bar");
+  file.println("# - Linux: Run \"bluetoothctl\" and type \"devices\"");
+  file.println("");
+  file.println("# Add your controllers below:");
+
+  // Write all controllers
+  for (int i = 0; i < numControllers; i++) {
+    file.println(targetControllers[i]);
+  }
+
+  file.close();
+  Serial.println(">>> Controllers saved to file");
+}
+
+void showHelp() {
+  Serial.println("\n=== Controller Management Commands ===");
+  Serial.println("Available commands:");
+  Serial.println("  list                      - Show all configured controllers");
+  Serial.println("  add <mac>                 - Add controller (e.g., add aa:bb:cc:dd:ee:ff)");
+  Serial.println("  remove <mac>              - Remove controller (e.g., remove aa:bb:cc:dd:ee:ff)");
+  Serial.println("  reload                    - Reload controllers from file");
+  Serial.println("  help                      - Show this help message");
+  Serial.println("");
+}
+
+void listControllers() {
+  Serial.println("\n=== Configured Controllers ===");
+  if (numControllers == 0) {
+    Serial.println("  No controllers configured");
+  } else {
+    for (int i = 0; i < numControllers; i++) {
+      Serial.print("  [");
+      Serial.print(i + 1);
+      Serial.print("] ");
+      Serial.println(targetControllers[i]);
+    }
+  }
+  Serial.print("Total: ");
+  Serial.print(numControllers);
+  Serial.print("/");
+  Serial.println(MAX_CONTROLLERS);
+  Serial.println("");
+}
+
+void addController(String mac) {
+  mac.toLowerCase();
+  mac.trim();
+
+  // Validate MAC format
+  if (!validateMAC(mac)) {
+    Serial.print("Invalid MAC address format: ");
+    Serial.println(mac);
+    Serial.println("Expected format: xx:xx:xx:xx:xx:xx (lowercase)");
+    return;
+  }
+
+  // Check if already exists
+  for (int i = 0; i < numControllers; i++) {
+    if (targetControllers[i] == mac) {
+      Serial.print("Controller already exists: ");
+      Serial.println(mac);
+      return;
+    }
+  }
+
+  // Check if list is full
+  if (numControllers >= MAX_CONTROLLERS) {
+    Serial.print("Controller list full (");
+    Serial.print(MAX_CONTROLLERS);
+    Serial.println(" max)");
+    return;
+  }
+
+  // Add controller
+  targetControllers[numControllers] = mac;
+  numControllers++;
+
+  Serial.print(">>> Controller added: ");
+  Serial.println(mac);
+
+  // Save to file
+  saveControllersToFile();
+}
+
+void removeController(String mac) {
+  mac.toLowerCase();
+  mac.trim();
+
+  // Find controller in list
+  int foundIndex = -1;
+  for (int i = 0; i < numControllers; i++) {
+    if (targetControllers[i] == mac) {
+      foundIndex = i;
+      break;
+    }
+  }
+
+  if (foundIndex == -1) {
+    Serial.print("Controller not found: ");
+    Serial.println(mac);
+    return;
+  }
+
+  // Shift remaining elements left
+  for (int i = foundIndex; i < numControllers - 1; i++) {
+    targetControllers[i] = targetControllers[i + 1];
+  }
+
+  // Clear last element and decrement count
+  targetControllers[numControllers - 1] = "";
+  numControllers--;
+
+  Serial.print(">>> Controller removed: ");
+  Serial.println(mac);
+
+  // Save to file
+  saveControllersToFile();
+}
+
+void reloadControllers() {
+  Serial.println(">>> Reloading controllers from file...");
+  loadControllersFromFile();
+}
+
+void handleSerialCommand() {
+  if (!Serial.available()) {
+    return;
+  }
+
+  // Read full line (non-blocking if line is ready)
+  String command = Serial.readStringUntil('\n');
+  command.trim();
+
+  if (command.length() == 0) {
+    return;
+  }
+
+  // Echo command for clarity
+  Serial.print("> ");
+  Serial.println(command);
+
+  // Parse command and argument
+  int spaceIndex = command.indexOf(' ');
+  String cmd = "";
+  String arg = "";
+
+  if (spaceIndex == -1) {
+    cmd = command;
+  } else {
+    cmd = command.substring(0, spaceIndex);
+    arg = command.substring(spaceIndex + 1);
+    arg.trim();
+  }
+
+  cmd.toLowerCase();
+
+  // Execute command
+  if (cmd == "help") {
+    showHelp();
+  } else if (cmd == "list") {
+    listControllers();
+  } else if (cmd == "add") {
+    if (arg.length() == 0) {
+      Serial.println("Usage: add <mac_address>");
+    } else {
+      addController(arg);
+    }
+  } else if (cmd == "remove") {
+    if (arg.length() == 0) {
+      Serial.println("Usage: remove <mac_address>");
+    } else {
+      removeController(arg);
+    }
+  } else if (cmd == "reload") {
+    reloadControllers();
+  } else {
+    Serial.print("Unknown command: ");
+    Serial.println(cmd);
+    Serial.println("Type 'help' for available commands");
+  }
+}
+
 class MyAdvertisedDeviceCallbacks: public BLEAdvertisedDeviceCallbacks {
   void onResult(BLEAdvertisedDevice advertisedDevice) {
     String address = advertisedDevice.getAddress().toString();
     address.toLowerCase();
     
     for (int i = 0; i < numControllers; i++) {
-      if (address == targetControllers[i].c_str()) {
+      if (address.c_str() == targetControllers[i].c_str()) {
         unsigned long now = millis();
         
         if (!controllerCurrentlyActive) {
@@ -195,12 +423,17 @@ void setup() {
   pBLEScan->setWindow(99);
 
   lastControllerSeen = millis();
+
+  Serial.println("\nType 'help' for controller management commands\n");
 }
 
 void loop() {
+  // Check for serial commands (non-blocking)
+  handleSerialCommand();
+
   pBLEScan->start(2, false);
   pBLEScan->clearResults();
-  
+
   unsigned long now = millis();
   unsigned long timeSinceLastSeen = now - lastControllerSeen;
   
