@@ -11,7 +11,7 @@
 String targetControllers[MAX_CONTROLLERS];
 int numControllers = 0;
 
-const unsigned long INACTIVITY_TIMEOUT = 10 * 60 * 1000;  // 10 minutes
+const unsigned long INACTIVITY_TIMEOUT = 2 * 60 * 1000;  // 2 minutes
 const unsigned long WAKE_COOLDOWN = 30 * 1000;
 const unsigned long STATUS_CHECK_INTERVAL = 5000;  // Check PC status every 5 seconds
 
@@ -500,7 +500,7 @@ void loop() {
   
   // Check inactivity timeout
   if (controllerCurrentlyActive && timeSinceLastSeen > INACTIVITY_TIMEOUT) {
-    Serial.println("Controller inactive for 10+ minutes");
+    Serial.println("Controller inactive for 2+ minutes");
     sleepPC();
     controllerCurrentlyActive = false;
   }
