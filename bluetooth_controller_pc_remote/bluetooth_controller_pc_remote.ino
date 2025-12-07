@@ -419,6 +419,17 @@ class MyAdvertisedDeviceCallbacks: public BLEAdvertisedDeviceCallbacks {
     if (scanMode) {
       Serial.print("BLE scan: ");
       Serial.print(address);
+
+      // Add device name if available
+      if (advertisedDevice.haveName()) {
+        Serial.print(" (");
+        Serial.print(advertisedDevice.getName().c_str());
+        Serial.print(")");
+      } else {
+        Serial.print(" (no name)");
+      }
+
+      // Add target controller tag
       if (isTarget) {
         Serial.println(" [TARGET CONTROLLER]");
       } else {
