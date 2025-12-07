@@ -1,14 +1,15 @@
 #include <BLEDevice.h>
 #include <BLEScan.h>
+#include <LittleFS.h>
 
 #define POWER_PIN 5
 #define PC_STATUS_PIN 4  // Reads PC power state
 #define POWER_PULSE_DURATION 500
+#define MAX_CONTROLLERS 10
+#define CONTROLLERS_FILE "/controllers.txt"
 
-String targetControllers[] = {
-  "b2:3c:44:d1:5a:8e"  // Your controller MAC
-};
-const int numControllers = 1;
+String targetControllers[MAX_CONTROLLERS];
+int numControllers = 0;
 
 const unsigned long INACTIVITY_TIMEOUT = 10 * 60 * 1000;  // 10 minutes
 const unsigned long WAKE_COOLDOWN = 30 * 1000;
@@ -75,6 +76,76 @@ void sleepPC() {
   sleepSignalSent = true;
 }
 
+void loadControllersFromFile() {
+  Serial.println("\n--- Loading controller list ---");
+
+  if (!LittleFS.begin(true)) {
+    Serial.println("Failed to mount LittleFS, using defaults");
+    targetControllers[0] = "b2:3c:44:d1:5a:8e";
+    numControllers = 1;
+    return;
+  }
+
+  if (!LittleFS.exists(CONTROLLERS_FILE)) {
+    Serial.println("controllers.txt not found, creating default file...");
+    File file = LittleFS.open(CONTROLLERS_FILE, "w");
+    if (file) {
+      file.println("# Add your controller MAC addresses here (one per line)");
+      file.println("# Lines starting with # are comments");
+      file.println("# Format: xx:xx:xx:xx:xx:xx (lowercase)");
+      file.println("#");
+      file.println("b2:3c:44:d1:5a:8e");
+      file.close();
+      Serial.println("Default controllers.txt created");
+    }
+  }
+
+  File file = LittleFS.open(CONTROLLERS_FILE, "r");
+  if (!file) {
+    Serial.println("Failed to open controllers.txt");
+    targetControllers[0] = "b2:3c:44:d1:5a:8e";
+    numControllers = 1;
+    return;
+  }
+
+  numControllers = 0;
+  while (file.available() && numControllers < MAX_CONTROLLERS) {
+    String line = file.readStringUntil('\n');
+    line.trim();
+
+    // Skip empty lines and comments
+    if (line.length() == 0 || line.startsWith("#")) {
+      continue;
+    }
+
+    // Validate MAC address format (basic check)
+    line.toLowerCase();
+    if (line.length() == 17 && line.charAt(2) == ':' && line.charAt(5) == ':') {
+      targetControllers[numControllers] = line;
+      Serial.print("  [");
+      Serial.print(numControllers + 1);
+      Serial.print("] ");
+      Serial.println(line);
+      numControllers++;
+    } else {
+      Serial.print("  Invalid MAC format, skipping: ");
+      Serial.println(line);
+    }
+  }
+
+  file.close();
+
+  if (numControllers == 0) {
+    Serial.println("No valid controllers found, using default");
+    targetControllers[0] = "b2:3c:44:d1:5a:8e";
+    numControllers = 1;
+  }
+
+  Serial.print("Loaded ");
+  Serial.print(numControllers);
+  Serial.println(" controller(s)\n");
+}
+
 class MyAdvertisedDeviceCallbacks: public BLEAdvertisedDeviceCallbacks {
   void onResult(BLEAdvertisedDevice advertisedDevice) {
     String address = advertisedDevice.getAddress().toString();
@@ -101,25 +172,28 @@ class MyAdvertisedDeviceCallbacks: public BLEAdvertisedDeviceCallbacks {
 void setup() {
   Serial.begin(115200);
   delay(2000);
-  
+
   pinMode(POWER_PIN, INPUT);
   pinMode(PC_STATUS_PIN, INPUT);
-  
+
   Serial.println("=== PC Wake/Sleep Controller with Status Detection ===");
-  
+
+  // Load controller list from file
+  loadControllersFromFile();
+
   // Check initial PC state
   bool pcOn = isPCOn();
   Serial.print("Initial PC state: ");
   Serial.println(pcOn ? "ON" : "OFF/SLEEP");
   lastPCState = pcOn;
-  
+
   BLEDevice::init("");
   pBLEScan = BLEDevice::getScan();
   pBLEScan->setAdvertisedDeviceCallbacks(new MyAdvertisedDeviceCallbacks());
   pBLEScan->setActiveScan(true);
   pBLEScan->setInterval(100);
   pBLEScan->setWindow(99);
-  
+
   lastControllerSeen = millis();
 }
 
