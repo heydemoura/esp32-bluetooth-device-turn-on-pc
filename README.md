@@ -9,6 +9,7 @@ Automatically wake your PC from sleep when you turn on your Bluetooth game contr
 - 🔍 **PC State Detection**: Monitors motherboard 5V to determine if PC is on/off
 - 🛡️ **Safe Operation**: Only sends power signals when state change is needed
 - 📊 **Multiple Controllers**: Supports monitoring multiple Bluetooth controllers
+- 🔘 **Case Button Pass-Through**: Physical power button works through ESP32 (no need to disconnect)
 - ⚡ **Low Power**: Runs on motherboard USB standby power
 
 ## Compatibility
@@ -84,6 +85,7 @@ Automatically wake your PC from sleep when you turn on your Bluetooth game contr
 ┌─────────────────────────────────────┐
 │          ESP32-C3 Board             │
 │                                     │
+│  GPIO 3  ●  (Case Button Input)     │
 │  GPIO 4  ●  (PC Status Input)       │
 │  GPIO 5  ●  (Power Button Control)  │
 │  GND     ●  (Common Ground)         │
@@ -118,6 +120,17 @@ GPIO 5 ── [1kΩ] ── Base
 
 When GPIO 5 goes HIGH → Transistor closes → PWR+ shorts to PWR- → PC wakes/sleeps
 
+### Case Power Button Connection
+
+```
+PC Case Power Button ──┬── GPIO 3 (with internal pull-up)
+                       └── GND
+```
+
+When button is pressed → GPIO 3 connects to GND → ESP32 triggers power signal
+
+**Note:** The physical case button works through the ESP32, so you don't need to disconnect your case's original power button. Simply connect its two wires to GPIO 3 and GND on the ESP32.
+
 ## Step-by-Step Assembly
 
 ### 1. Prepare the Voltage Divider
@@ -143,7 +156,16 @@ When GPIO 5 goes HIGH → Transistor closes → PWR+ shorts to PWR- → PC wakes
 3. Connect relay **IN** to ESP32 **GPIO 5**
 4. Connect relay **NO** (Normally Open) terminals to motherboard **PWR_SW+** and **PWR_SW-**
 
-### 3. Power the ESP32
+### 3. Connect the Case Power Button (Optional but Recommended)
+
+1. Disconnect your PC case's power button jumpers from the motherboard PWR_SW header
+2. Connect one wire from the case button to ESP32 **GPIO 3**
+3. Connect the other wire from the case button to ESP32 **GND**
+4. The button will now work through the ESP32 with debouncing and rate limiting
+
+**Note:** Button polarity doesn't matter - either wire can go to GPIO 3 or GND.
+
+### 4. Power the ESP32
 
 1. Locate a USB 2.0 internal header on your motherboard
 2. Connect **Pin 1 or 2 (+5V)** to ESP32 **5V/VIN**
@@ -154,7 +176,7 @@ When GPIO 5 goes HIGH → Transistor closes → PWR+ shorts to PWR- → PC wakes
 - Enable "USB Power in S4/S5" or similar option
 - Disable "ErP" or "EuP 2013" if present
 
-### 4. Find the 5V Source
+### 5. Find the 5V Source
 
 You need a 5V source that is:
 - ✅ **ON when PC is running**
@@ -244,7 +266,13 @@ String targetControllers[] = {
 const unsigned long INACTIVITY_TIMEOUT = 2 * 60 * 1000;  // 2 minutes
 const unsigned long WAKE_COOLDOWN = 30 * 1000;            // 30 seconds
 const unsigned long STATUS_CHECK_INTERVAL = 5000;         // 5 seconds
+const unsigned long BUTTON_DEBOUNCE_TIME = 50;            // 50ms (case button)
+const unsigned long BUTTON_LOCKOUT_TIME = 500;            // 500ms (case button)
 ```
+
+**Case Button Timing:**
+- `BUTTON_DEBOUNCE_TIME`: Filters electrical bounce (increase to 100ms if button triggers multiple times)
+- `BUTTON_LOCKOUT_TIME`: Minimum time between button presses (prevents accidental double-press)
 
 ### Voltage Divider Threshold
 
@@ -267,12 +295,14 @@ bool isPCOn() {
 
 ### Normal Operation
 
-1. **Power on PC manually** (first time)
+1. **Power on PC manually** (first time) - Use case button or controller wake
 2. ESP32 begins scanning for controllers
 3. **Turn on your controller** → ESP32 detects it → PC wakes (if sleeping)
 4. Play games normally
 5. **Turn off controller** or let it auto-sleep
 6. After 2 minutes of inactivity → ESP32 sends sleep signal to PC
+
+**Case Button:** If you connected your case power button to GPIO 3, it works normally at any time - press to wake from sleep, press again to sleep, or hold for force shutdown (depending on your OS power settings).
 
 ### Serial Monitor Output
 
@@ -349,6 +379,28 @@ PC state changed: OFF/SLEEP
 2. Check PC state detection is working correctly
 3. Verify controller isn't rapidly connecting/disconnecting
 4. Add more debug output to see what's triggering signals
+
+### Case Button Not Working
+
+**Issue:** Physical case power button doesn't trigger PC
+
+**Solutions:**
+1. Verify button wires are connected to GPIO 3 and GND
+2. Check button type is momentary (normally open)
+3. Test button with multimeter - should show continuity when pressed
+4. Swap GPIO 3 and GND connections (polarity doesn't matter for the button)
+5. Open Serial Monitor - button presses should trigger power signals
+6. Check `BUTTON_LOCKOUT_TIME` isn't too long (default 500ms)
+
+### Case Button Triggers Multiple Times
+
+**Issue:** Single button press causes multiple power signals
+
+**Solutions:**
+1. Increase `BUTTON_DEBOUNCE_TIME` from 50ms to 100ms
+2. Check button quality - cheap buttons may have excessive bounce
+3. Add hardware capacitor (0.1µF) across button terminals if needed
+4. Verify wiring - loose connections can cause false triggers
 
 ## Safety Notes
 
@@ -432,8 +484,14 @@ A: Use an external USB power adapter (5V) or enable USB standby in BIOS.
 **Q: Can I make it wake via keyboard/mouse instead?**  
 A: Yes, but you'd need to use Wake-on-LAN or USB HID emulation instead.
 
-**Q: Will this work on laptops?**  
+**Q: Will this work on laptops?**
 A: Technically yes, but accessing internal headers is more difficult. External power button control is easier.
+
+**Q: Do I have to disconnect my case's power button?**
+A: No! You can leave it connected to the motherboard OR route it through the ESP32 (GPIO 3 + GND). If routed through ESP32, you get software debouncing and the button still works normally.
+
+**Q: Can I use both the case button and controller wake at the same time?**
+A: Yes! The case button provides direct pass-through (no safety checks), while controller detection uses the normal wake/sleep logic with cooldowns.
 
 ## Contributing
 
