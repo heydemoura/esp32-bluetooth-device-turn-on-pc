@@ -5,6 +5,7 @@
 #define POWER_PIN 5
 #define PC_STATUS_PIN 4  // Reads PC power state
 #define POWER_PULSE_DURATION 500
+#define CASE_BUTTON_PIN 3
 #define MAX_CONTROLLERS 10
 #define CONTROLLERS_FILE "/controllers.txt"
 
@@ -14,6 +15,8 @@ int numControllers = 0;
 const unsigned long INACTIVITY_TIMEOUT = 2 * 60 * 1000;  // 2 minutes
 const unsigned long WAKE_COOLDOWN = 30 * 1000;
 const unsigned long STATUS_CHECK_INTERVAL = 5000;  // Check PC status every 5 seconds
+const unsigned long BUTTON_DEBOUNCE_TIME = 50;     // 50ms debounce
+const unsigned long BUTTON_LOCKOUT_TIME = 500;     // 500ms between presses
 
 unsigned long lastControllerSeen = 0;
 bool controllerCurrentlyActive = false;
@@ -22,6 +25,10 @@ unsigned long lastWakeTime = 0;
 unsigned long lastStatusCheck = 0;
 bool lastPCState = false;
 bool scanMode = false;  // BLE scan debug mode
+bool lastButtonState = HIGH;               // Track previous button state
+unsigned long lastButtonPressTime = 0;     // Timestamp of last valid press
+unsigned long buttonDebounceStart = 0;     // Timestamp when debounce started
+bool buttonDebouncing = false;             // Currently in debounce window
 
 BLEScan* pBLEScan;
 
@@ -42,6 +49,41 @@ void sendPowerSignal(String reason) {
   pinMode(POWER_PIN, INPUT);
   
   Serial.println("Power signal sent");
+}
+
+void sendDirectPowerSignal() {
+  // Direct pass-through - NO safety checks, NO cooldowns
+  pinMode(POWER_PIN, OUTPUT);
+  digitalWrite(POWER_PIN, LOW);
+  delay(POWER_PULSE_DURATION);
+  pinMode(POWER_PIN, INPUT);
+}
+
+void handleCaseButton() {
+  bool currentButtonState = digitalRead(CASE_BUTTON_PIN);
+  unsigned long now = millis();
+
+  // Detect falling edge (button just pressed)
+  if (lastButtonState == HIGH && currentButtonState == LOW) {
+    // Start debounce timer
+    buttonDebouncing = true;
+    buttonDebounceStart = now;
+  }
+
+  // Check if debounce period has elapsed
+  if (buttonDebouncing && (now - buttonDebounceStart >= BUTTON_DEBOUNCE_TIME)) {
+    // Verify button is still pressed after debounce
+    if (digitalRead(CASE_BUTTON_PIN) == LOW) {
+      // Check lockout period (prevent rapid successive presses)
+      if (now - lastButtonPressTime >= BUTTON_LOCKOUT_TIME) {
+        sendDirectPowerSignal();
+        lastButtonPressTime = now;
+      }
+    }
+    buttonDebouncing = false;
+  }
+
+  lastButtonState = currentButtonState;
 }
 
 void wakePC() {
@@ -445,6 +487,7 @@ void setup() {
 
   pinMode(POWER_PIN, INPUT);
   pinMode(PC_STATUS_PIN, INPUT);
+  pinMode(CASE_BUTTON_PIN, INPUT_PULLUP);
 
   Serial.println("=== PC Wake/Sleep Controller with Status Detection ===");
 
@@ -470,6 +513,8 @@ void setup() {
 }
 
 void loop() {
+  handleCaseButton();
+
   // Check for serial commands (non-blocking)
   handleSerialCommand();
 
