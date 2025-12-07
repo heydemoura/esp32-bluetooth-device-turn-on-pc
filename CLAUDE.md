@@ -46,37 +46,51 @@ This is an ESP32-C3 Arduino project that automatically wakes a PC from sleep whe
 
 ## Development Commands
 
-**Build and Upload:**
+**Initial Setup (First Time):**
 1. Open `bluetooth_controller_pc_remote.ino` in Arduino IDE
 2. Select board: Tools → Board → ESP32C3 Dev Module
 3. Set USB CDC On Boot: Enabled
-4. Select correct COM port: Tools → Port
-5. Click Upload button or use Ctrl/Cmd + U
+4. Set Partition Scheme: Default 4MB with spiffs (for LittleFS)
+5. Select correct COM port: Tools → Port
+
+**Upload Filesystem (controllers.txt):**
+1. Install ESP32 LittleFS Upload Plugin:
+   - Download: https://github.com/lorol/arduino-esp32littlefs-plugin/releases
+   - Extract to `<Arduino>/tools/ESP32LittleFS/tool/esp32littlefs.jar`
+   - Restart Arduino IDE
+
+2. Edit `data/controllers.txt` with your controller MAC addresses
+
+3. Upload filesystem: Tools → ESP32 Sketch Data Upload
+   - This uploads everything in the `data/` folder to ESP32
+   - Only needed when `controllers.txt` changes
+
+**Upload Sketch:**
+- Click Upload button or use Ctrl/Cmd + U
+- Can upload sketch independently of filesystem
 
 **Serial Monitor:**
 - Baud rate: 115200
 - Open via: Tools → Serial Monitor or Ctrl/Cmd + Shift + M
 - Shows BLE scan results, controller detection, and power state changes
 
-**No build system or testing framework** - this is a single Arduino sketch.
+**Development Workflow:**
+1. Edit `data/controllers.txt` → Upload filesystem (one time)
+2. Edit code → Upload sketch (as needed)
+3. No need to re-upload filesystem unless controllers change
 
 ## Configuration Requirements
 
 **Before deployment, must configure:**
 
-1. **Controller MAC addresses** - Stored in `/controllers.txt` on LittleFS:
-   - File is auto-created on first boot with default MAC address
+1. **Controller MAC addresses** - Stored in `data/controllers.txt` (bundled with build):
+   - Edit `data/controllers.txt` before uploading
    - Format: one MAC per line, lowercase with colons (xx:xx:xx:xx:xx:xx)
    - Lines starting with # are comments
    - Supports up to 10 controllers (MAX_CONTROLLERS define)
    - Find MAC via OS Bluetooth settings or `bluetoothctl devices`
-
-   **To upload controllers.txt to ESP32:**
-   - Use Arduino IDE: Tools → ESP32 Sketch Data Upload (requires plugin)
-   - Or use esptool.py to upload LittleFS partition
-   - Or let the code create default file and edit via serial filesystem commands
-
-   See `controllers.txt.example` for file format
+   - Upload to ESP32 using: Tools → ESP32 Sketch Data Upload
+   - File is auto-created with defaults if not found on filesystem
 
 2. **Voltage divider threshold** (line 29):
    ```cpp
@@ -86,7 +100,7 @@ This is an ESP32-C3 Arduino project that automatically wakes a PC from sleep whe
    - Set threshold midway between the two values
 
 3. **Timing parameters** (lines 13-15):
-   - `INACTIVITY_TIMEOUT`: How long before auto-sleep (default 10min)
+   - `INACTIVITY_TIMEOUT`: How long before auto-sleep (default 2min)
    - `WAKE_COOLDOWN`: Prevents wake signal spam (default 30s)
    - `STATUS_CHECK_INTERVAL`: PC state polling frequency (default 5s)
 
@@ -138,7 +152,7 @@ Status - PC: ON, Controller: Active (last seen 12s ago)
 **Common issues visible in serial:**
 - "PC already on, skipping wake signal" - State detection working correctly
 - "Wake cooldown active" - Too many wake attempts (increase cooldown)
-- "Controller inactive for 10+ minutes" - About to send sleep signal
+- "Controller inactive for 2+ minutes" - About to send sleep signal
 - "PC state changed: OFF/SLEEP" - External power change detected
 
 ## Hardware Troubleshooting Context

@@ -5,7 +5,7 @@ Automatically wake your PC from sleep when you turn on your Bluetooth game contr
 ## Features
 
 - 🎮 **Automatic PC Wake**: Detects when your Bluetooth controller powers on and wakes your PC
-- 😴 **Auto Sleep**: Puts PC to sleep after 10 minutes of controller inactivity
+- 😴 **Auto Sleep**: Puts PC to sleep after 2 minutes of controller inactivity
 - 🔍 **PC State Detection**: Monitors motherboard 5V to determine if PC is on/off
 - 🛡️ **Safe Operation**: Only sends power signals when state change is needed
 - 📊 **Multiple Controllers**: Supports monitoring multiple Bluetooth controllers
@@ -216,7 +216,7 @@ devices
 
 1. Copy the code from `pc-wake-sleep.ino`
 2. Replace MAC address in `targetControllers[]` with your controller's MAC
-3. Adjust `INACTIVITY_TIMEOUT` if desired (default: 10 minutes)
+3. Adjust `INACTIVITY_TIMEOUT` if desired (default: 2 minutes)
 4. Click **Upload** button
 5. Open **Serial Monitor** (115200 baud) to see status
 
@@ -241,7 +241,7 @@ String targetControllers[] = {
 ### Timing Settings
 
 ```cpp
-const unsigned long INACTIVITY_TIMEOUT = 10 * 60 * 1000;  // 10 minutes
+const unsigned long INACTIVITY_TIMEOUT = 2 * 60 * 1000;  // 2 minutes
 const unsigned long WAKE_COOLDOWN = 30 * 1000;            // 30 seconds
 const unsigned long STATUS_CHECK_INTERVAL = 5000;         // 5 seconds
 ```
@@ -272,7 +272,7 @@ bool isPCOn() {
 3. **Turn on your controller** → ESP32 detects it → PC wakes (if sleeping)
 4. Play games normally
 5. **Turn off controller** or let it auto-sleep
-6. After 10 minutes of inactivity → ESP32 sends sleep signal to PC
+6. After 2 minutes of inactivity → ESP32 sends sleep signal to PC
 
 ### Serial Monitor Output
 
@@ -288,8 +288,8 @@ Found 3 devices
 
 Status - PC: ON, Controller: Active (last seen 12s ago)
 
-[10 minutes later...]
-Controller inactive for 10+ minutes
+[2 minutes later...]
+Controller inactive for 2+ minutes
 >>> Sending power signal: SLEEP PC
 Power signal sent
 PC state changed: OFF/SLEEP
