@@ -21,6 +21,7 @@ bool sleepSignalSent = false;
 unsigned long lastWakeTime = 0;
 unsigned long lastStatusCheck = 0;
 bool lastPCState = false;
+bool scanMode = false;  // BLE scan debug mode
 
 BLEScan* pBLEScan;
 
@@ -213,6 +214,7 @@ void showHelp() {
   Serial.println("  add <mac>                 - Add controller (e.g., add aa:bb:cc:dd:ee:ff)");
   Serial.println("  remove <mac>              - Remove controller (e.g., remove aa:bb:cc:dd:ee:ff)");
   Serial.println("  reload                    - Reload controllers from file");
+  Serial.println("  scan <on|off>             - Enable/disable BLE scan debug output");
   Serial.println("  help                      - Show this help message");
   Serial.println("");
 }
@@ -367,6 +369,21 @@ void handleSerialCommand() {
     }
   } else if (cmd == "reload") {
     reloadControllers();
+  } else if (cmd == "scan") {
+    if (arg.length() == 0) {
+      Serial.println("Usage: scan <on|off>");
+    } else {
+      arg.toLowerCase();
+      if (arg == "on") {
+        scanMode = true;
+        Serial.println(">>> BLE scan debug mode: ON");
+      } else if (arg == "off") {
+        scanMode = false;
+        Serial.println(">>> BLE scan debug mode: OFF");
+      } else {
+        Serial.println("Invalid parameter. Use: scan on or scan off");
+      }
+    }
   } else {
     Serial.print("Unknown command: ");
     Serial.println(cmd);
@@ -378,20 +395,34 @@ class MyAdvertisedDeviceCallbacks: public BLEAdvertisedDeviceCallbacks {
   void onResult(BLEAdvertisedDevice advertisedDevice) {
     String address = advertisedDevice.getAddress().toString();
     address.toLowerCase();
-    
+
+    // Check if this is a target controller
+    bool isTarget = false;
     for (int i = 0; i < numControllers; i++) {
-      if (address.c_str() == targetControllers[i].c_str()) {
+      if (address == targetControllers[i]) {
+        isTarget = true;
         unsigned long now = millis();
-        
+
         if (!controllerCurrentlyActive) {
           Serial.print("Controller turned ON: ");
           Serial.println(address);
           wakePC();
           controllerCurrentlyActive = true;
         }
-        
+
         lastControllerSeen = now;
         break;
+      }
+    }
+
+    // Show debug output only if scan mode is enabled
+    if (scanMode) {
+      Serial.print("BLE scan: ");
+      Serial.print(address);
+      if (isTarget) {
+        Serial.println(" [TARGET CONTROLLER]");
+      } else {
+        Serial.println();
       }
     }
   }
