@@ -64,15 +64,19 @@ This is an ESP32-C3 Arduino project that automatically wakes a PC from sleep whe
 
 **Before deployment, must configure:**
 
-1. **Controller MAC addresses** (lines 8-10):
-   ```cpp
-   String targetControllers[] = {
-     "b2:3c:44:d1:5a:8e"  // Replace with actual MAC
-   };
-   const int numControllers = 1;  // Update count
-   ```
-   - MAC must be lowercase with colons
+1. **Controller MAC addresses** - Stored in `/controllers.txt` on LittleFS:
+   - File is auto-created on first boot with default MAC address
+   - Format: one MAC per line, lowercase with colons (xx:xx:xx:xx:xx:xx)
+   - Lines starting with # are comments
+   - Supports up to 10 controllers (MAX_CONTROLLERS define)
    - Find MAC via OS Bluetooth settings or `bluetoothctl devices`
+
+   **To upload controllers.txt to ESP32:**
+   - Use Arduino IDE: Tools → ESP32 Sketch Data Upload (requires plugin)
+   - Or use esptool.py to upload LittleFS partition
+   - Or let the code create default file and edit via serial filesystem commands
+
+   See `controllers.txt.example` for file format
 
 2. **Voltage divider threshold** (line 29):
    ```cpp
@@ -88,14 +92,17 @@ This is an ESP32-C3 Arduino project that automatically wakes a PC from sleep whe
 
 ## Common Modifications
 
-**Add multiple controllers:**
+**Add multiple controllers** - Edit `/controllers.txt`:
+```
+# My controllers
+a4:5e:60:c8:2b:1f
+b2:3c:44:d1:5a:8e
+c8:7f:54:a2:9b:3d
+```
+
+**Change max controller limit:**
 ```cpp
-String targetControllers[] = {
-  "a4:5e:60:c8:2b:1f",
-  "b2:3c:44:d1:5a:8e",
-  "c8:7f:54:a2:9b:3d"
-};
-const int numControllers = 3;
+#define MAX_CONTROLLERS 20  // Increase from 10
 ```
 
 **Adjust power button pulse duration** (if PC doesn't respond):
@@ -117,6 +124,11 @@ Replace lines 153-157 with immediate sleep on controller disconnect.
 **Normal operation shows:**
 ```
 === PC Wake/Sleep Controller with Status Detection ===
+
+--- Loading controller list ---
+  [1] b2:3c:44:d1:5a:8e
+Loaded 1 controller(s)
+
 Initial PC state: ON
 Controller turned ON: b2:3c:44:d1:5a:8e
 PC already on, skipping wake signal
