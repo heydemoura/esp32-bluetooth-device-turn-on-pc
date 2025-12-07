@@ -4,12 +4,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This is an ESP32-C3 Arduino project that automatically wakes a PC from sleep when a Bluetooth game controller is turned on, and puts it to sleep after inactivity. The system uses BLE scanning to detect controller power-on events and monitors PC power state through motherboard voltage sensing.
+ESP32-C3 Arduino project that automatically wakes a PC from sleep when a Bluetooth game controller powers on, and puts it to sleep after 2 minutes of inactivity. 
 
 ## Hardware Architecture
 
 **Key Components:**
-- ESP32-C3 microcontroller (BLE only - no Bluetooth Classic)
+- ESP32-C3 microcontroller (BLE only - 160KB RAM, 1.3MB flash limit)
 - NPN transistor (2N2222) or relay module for power button control
 - Voltage divider (10kΩ + 4.7kΩ) for PC state detection
 
@@ -19,18 +19,26 @@ This is an ESP32-C3 Arduino project that automatically wakes a PC from sleep whe
 
 **Critical Constraints:**
 - ESP32-C3 only supports BLE, not Bluetooth Classic (affects controller compatibility)
+- Flash memory limit: 1,310,720 bytes (1.25MB) - code must fit within this
 - GPIO analog reads are 0-3.3V max (voltage divider reduces 5V to ~1.6V)
 - Power button control uses momentary pulse (500ms default)
 
 ## Code Architecture
 
-**Single-file Arduino sketch:** `bluetooth_controller_pc_remote.ino`
+**Single-file Arduino sketch:** `bluetooth_controller_pc_remote/bluetooth_controller_pc_remote.ino`
+
+**Major Components:**
+1. **BLE Controller Detection** - Continuous 2s scan intervals, MAC address matching
+2. **PC Power Control** - Transistor-based power button pulsing with safety checks
+3. **PC State Monitoring** - Voltage divider reading every 5s
+4. **LittleFS Storage** - Persistent controller list and WiFi credentials
+5. **Serial Command Interface** - list, add, remove, reload, scan on/off, help
 
 **Core State Machine:**
 1. BLE scan runs continuously (2s intervals)
 2. When target controller MAC detected → wake PC if sleeping
 3. Track last-seen timestamp for controller
-4. After 10min inactivity → send sleep signal
+4. After 2min inactivity → send sleep signal
 5. Periodic PC state monitoring (5s interval) to detect external power changes
 
 **Key State Variables:**
@@ -38,6 +46,7 @@ This is an ESP32-C3 Arduino project that automatically wakes a PC from sleep whe
 - `lastControllerSeen`: Timestamp of last BLE detection
 - `sleepSignalSent`: Prevents repeated sleep signals
 - `lastPCState`: Tracks PC on/off transitions
+- `apMode`: WiFi access point mode active (true) or station mode (false)
 
 **Safety Mechanisms:**
 - Wake cooldown (30s) prevents signal spamming
@@ -47,11 +56,12 @@ This is an ESP32-C3 Arduino project that automatically wakes a PC from sleep whe
 ## Development Commands
 
 **Initial Setup (First Time):**
-1. Open `bluetooth_controller_pc_remote.ino` in Arduino IDE
+1. Open `bluetooth_controller_pc_remote/bluetooth_controller_pc_remote.ino` in Arduino IDE
 2. Select board: Tools → Board → ESP32C3 Dev Module
 3. Set USB CDC On Boot: Enabled
 4. Set Partition Scheme: Default 4MB with spiffs (for LittleFS)
 5. Select correct COM port: Tools → Port
+6. Install library: Tools → Manage Libraries → Search "ArduinoJson" → Install version 6.x
 
 **Upload Filesystem (controllers.txt):**
 1. Install ESP32 LittleFS Upload Plugin:
@@ -74,44 +84,84 @@ This is an ESP32-C3 Arduino project that automatically wakes a PC from sleep whe
 - Open via: Tools → Serial Monitor or Ctrl/Cmd + Shift + M
 - Shows BLE scan results, controller detection, and power state changes
 
-**Development Workflow:**
-1. Edit `data/controllers.txt` → Upload filesystem (one time)
-2. Edit code → Upload sketch (as needed)
-3. No need to re-upload filesystem unless controllers change
+**Serial Commands Available at Runtime:**
+- `list` - Show all configured controllers
+- `add <mac>` - Add controller (e.g., add aa:bb:cc:dd:ee:ff)
+- `remove <mac>` - Remove controller
+- `reload` - Reload controllers from file
+- `scan on/off` - Enable/disable BLE scan debug output
+- `help` - Show command list
+
+## Web Server Architecture
+
+> Not yet implemented, but planned for future versions
+
+**WiFi Setup Flow:**
+1. Boot → Try load credentials from `/wifi.json` (LittleFS)
+2. If found → Connect to WiFi (station mode)
+3. If not found or failed → Start AP mode (SSID: "ESP32-Setup", password: "12345678")
+4. AP mode → Captive portal redirects to web interface
+5. User configures WiFi → Saves to `/wifi.json` → ESP32 restarts
+
+**REST API Endpoints:**
+- `GET /` - HTML dashboard (or setup page in AP mode)
+- `GET /api/status` - System status (PC state, controllers, WiFi info)
+- `GET /api/controllers` - List controllers (JSON array)
+- `POST /api/controllers` - Add controller: `{"mac":"aa:bb:cc:dd:ee:ff"}`
+- `DELETE /api/controllers/{mac}` - Remove controller
+- `POST /api/reload` - Reload controllers from file
+- `GET /api/scan` - BLE scan (5s, returns devices with names)
+- `POST /api/wifi/configure` - Set WiFi credentials (AP mode only)
+
+**Memory Optimization:**
+- HTML content stored in PROGMEM (flash) to save RAM
+- Heavily minified HTML/CSS/JS (~1KB dashboard, ~0.6KB setup)
+- Aggressive string optimization in serial messages
+- Non-blocking web server calls (`server.handleClient()`)
 
 ## Configuration Requirements
 
 **Before deployment, must configure:**
 
-1. **Controller MAC addresses** - Stored in `data/controllers.txt` (bundled with build):
-   - Edit `data/controllers.txt` before uploading
+1. **Controller MAC addresses** - Stored in `data/controllers.txt`:
    - Format: one MAC per line, lowercase with colons (xx:xx:xx:xx:xx:xx)
    - Lines starting with # are comments
    - Supports up to 10 controllers (MAX_CONTROLLERS define)
-   - Find MAC via OS Bluetooth settings or `bluetoothctl devices`
-   - Upload to ESP32 using: Tools → ESP32 Sketch Data Upload
-   - File is auto-created with defaults if not found on filesystem
+   - Can also manage via serial commands or web API at runtime
 
-2. **Voltage divider threshold** (line 29):
+2. **Voltage divider threshold** (line 44):
    ```cpp
-   return reading > 500;  // Calibrate per hardware setup
+   return reading > 1000;  // Calibrate per hardware setup
    ```
    - Read `analogRead(PC_STATUS_PIN)` when PC is ON vs OFF
    - Set threshold midway between the two values
+   - Typical: ~2000 when ON, <100 when OFF
 
-3. **Timing parameters** (lines 13-15):
+3. **Timing parameters** (lines 14-16):
    - `INACTIVITY_TIMEOUT`: How long before auto-sleep (default 2min)
    - `WAKE_COOLDOWN`: Prevents wake signal spam (default 30s)
    - `STATUS_CHECK_INTERVAL`: PC state polling frequency (default 5s)
 
+## Flash Memory Constraints
+
+**CRITICAL: ESP32-C3 has 1,310,720 byte flash limit**
+
+If sketch exceeds flash size during compilation:
+1. **Reduce HTML content** - Already heavily minified, but can remove features
+2. **Shorten serial messages** - Use concise error/status messages
+3. **Remove debug output** - Comment out non-essential Serial.println()
+4. **Optimize strings** - Avoid duplicate string literals
+5. **Reduce functionality** - Consider removing serial commands or web server
+
+Current sketch uses ~1.31MB (100% of available space) - no room for expansion without optimizations.
+
 ## Common Modifications
 
-**Add multiple controllers** - Edit `/controllers.txt`:
+**Add multiple controllers** - Edit `data/controllers.txt` or use web/serial interface:
 ```
 # My controllers
 a4:5e:60:c8:2b:1f
 b2:3c:44:d1:5a:8e
-c8:7f:54:a2:9b:3d
 ```
 
 **Change max controller limit:**
@@ -126,38 +176,34 @@ c8:7f:54:a2:9b:3d
 
 **Debug voltage readings** (add to loop for calibration):
 ```cpp
-Serial.print("Analog reading: ");
-Serial.println(analogRead(PC_STATUS_PIN));
+Serial.printf("Analog reading: %d\n", analogRead(PC_STATUS_PIN));
 ```
-
-**Change sleep trigger** (immediate vs time-based):
-Replace lines 153-157 with immediate sleep on controller disconnect.
 
 ## Debugging Serial Output
 
 **Normal operation shows:**
 ```
-=== PC Wake/Sleep Controller with Status Detection ===
+ESP32 PC Controller
+Loaded 1 controllers
+PC: ON
 
---- Loading controller list ---
-  [1] b2:3c:44:d1:5a:8e
-Loaded 1 controller(s)
-
-Initial PC state: ON
-Controller turned ON: b2:3c:44:d1:5a:8e
-PC already on, skipping wake signal
-Status - PC: ON, Controller: Active (last seen 12s ago)
+Type 'help' for commands
+WiFi: YourNetwork
+.........
+IP: 192.168.1.100
+Web server started
 ```
 
 **Common issues visible in serial:**
 - "PC already on, skipping wake signal" - State detection working correctly
 - "Wake cooldown active" - Too many wake attempts (increase cooldown)
-- "Controller inactive for 2+ minutes" - About to send sleep signal
+- "Inactive timeout" - About to send sleep signal
 - "PC state changed: OFF/SLEEP" - External power change detected
+- "WiFi disconnected, attempting reconnect..." - Auto-reconnect in progress
 
 ## Hardware Troubleshooting Context
 
-**If modifying state detection logic, note:**
+**If modifying state detection logic:**
 - Voltage divider output should be ~1.6V when 5V present (0V when off)
 - Analog read range: 0-4095 (12-bit ADC)
 - Typical readings: ~2000 when ON, <100 when OFF
@@ -170,10 +216,37 @@ Status - PC: ON, Controller: Active (last seen 12s ago)
 
 ## BLE Compatibility Notes
 
-ESP32-C3 limitation: Only BLE-advertising controllers work. If adding controller support:
-- 8BitDo controllers: ✅ BLE (compatible)
-- Xbox Wireless: ✅ BLE (compatible)
-- Nintendo Switch Pro: ✅ BLE (compatible)
-- PlayStation DualSense: ❌ Bluetooth Classic discovery (incompatible with ESP32-C3)
+ESP32-C3 limitation: Only BLE-advertising controllers work.
 
-For Bluetooth Classic support, would need ESP32 (original) or ESP32-S3 variant.
+**Compatible Controllers:**
+- 8BitDo controllers: ✅ BLE
+- Xbox Wireless: ✅ BLE
+- Nintendo Switch Pro: ✅ BLE
+
+**Incompatible:**
+- PlayStation DualSense: ❌ Bluetooth Classic discovery (requires ESP32 original/S3)
+
+**Important:** Some controllers advertise with different MAC addresses when paired vs unpaired. Use the web API `/api/scan` or serial command `scan on` to discover the actual advertising MAC address.
+
+## File Structure
+
+```
+bluetooth_controller_pc_remote/
+  bluetooth_controller_pc_remote.ino  # Main sketch (single file, ~900 lines)
+data/
+  controllers.txt                      # Controller MAC list (uploaded to LittleFS)
+  README.md                           # Instructions for LittleFS upload
+controllers.txt.example                # Template for controller list
+README.md                             # Hardware setup and usage guide
+CLAUDE.md                             # This file
+```
+
+## Web Development Workflow
+
+When modifying the web interface:
+1. Edit HTML content in `HTML_DASHBOARD` or `HTML_SETUP` constants (lines 884-918)
+2. Keep HTML heavily minified to fit flash constraints
+3. Use `R"rawliteral(...)rawliteral"` for raw string literals
+4. Avoid template literals (backticks) - use string concatenation instead
+5. Test in AP mode first (easier to access at 192.168.4.1)
+6. Verify total sketch size stays under 1,310,720 bytes
