@@ -1,12 +1,24 @@
 #include <BLEDevice.h>
 #include <BLEScan.h>
 #include <LittleFS.h>
+#include <WiFi.h>
+#include <WebServer.h>
+#include <DNSServer.h>
+#include <ArduinoJson.h>
 
 #define POWER_PIN 5
 #define PC_STATUS_PIN 4  // Reads PC power state
 #define POWER_PULSE_DURATION 500
 #define MAX_CONTROLLERS 10
 #define CONTROLLERS_FILE "/controllers.txt"
+
+// WiFi Configuration
+#define WIFI_CONFIG_FILE "/wifi.json"
+#define AP_SSID "ESP32-Controller-Setup"
+#define AP_PASSWORD ""  // Open AP
+#define DNS_PORT 53
+#define WEB_SERVER_PORT 80
+#define MAX_SCAN_RESULTS 50
 
 String targetControllers[MAX_CONTROLLERS];
 int numControllers = 0;
@@ -25,10 +37,30 @@ bool scanMode = false;  // BLE scan debug mode
 
 BLEScan* pBLEScan;
 
+// WiFi state
+bool apMode = false;
+String wifiSSID = "";
+String wifiPassword = "";
+unsigned long lastWiFiCheck = 0;
+const unsigned long WIFI_CHECK_INTERVAL = 30000;  // 30 seconds
+
+// Server instances
+WebServer server(WEB_SERVER_PORT);
+DNSServer dnsServer;
+
+// BLE scan results for /api/scan endpoint
+struct BLEDeviceInfo {
+  String mac;
+  String name;
+  bool isTarget;
+};
+BLEDeviceInfo scanResults[MAX_SCAN_RESULTS];
+int scanResultCount = 0;
+bool scanInProgress = false;
+
 bool isPCOn() {
   // Read voltage divider - adjust threshold based on your setup
   int reading = analogRead(PC_STATUS_PIN);
-  // Serial.printf("Reading from PC_STATUS_PIN: %d\n", reading);
   return reading > 1000;  // Tune this value
 }
 
@@ -79,73 +111,42 @@ void sleepPC() {
 }
 
 void loadControllersFromFile() {
-  Serial.println("\n--- Loading controller list ---");
-
   if (!LittleFS.begin(true)) {
-    Serial.println("Failed to mount LittleFS, using defaults");
     targetControllers[0] = "b2:3c:44:d1:5a:8e";
     numControllers = 1;
     return;
   }
-
   if (!LittleFS.exists(CONTROLLERS_FILE)) {
-    Serial.println("controllers.txt not found, creating default file...");
     File file = LittleFS.open(CONTROLLERS_FILE, "w");
     if (file) {
-      file.println("# Add your controller MAC addresses here (one per line)");
-      file.println("# Lines starting with # are comments");
-      file.println("# Format: xx:xx:xx:xx:xx:xx (lowercase)");
-      file.println("#");
       file.println("b2:3c:44:d1:5a:8e");
       file.close();
-      Serial.println("Default controllers.txt created");
     }
   }
-
   File file = LittleFS.open(CONTROLLERS_FILE, "r");
   if (!file) {
-    Serial.println("Failed to open controllers.txt");
     targetControllers[0] = "b2:3c:44:d1:5a:8e";
     numControllers = 1;
     return;
   }
-
   numControllers = 0;
   while (file.available() && numControllers < MAX_CONTROLLERS) {
     String line = file.readStringUntil('\n');
     line.trim();
-
-    // Skip empty lines and comments
-    if (line.length() == 0 || line.startsWith("#")) {
-      continue;
-    }
-
-    // Validate MAC address format (basic check)
+    if (line.length() == 0 || line.startsWith("#")) continue;
     line.toLowerCase();
     if (line.length() == 17 && line.charAt(2) == ':' && line.charAt(5) == ':') {
-      targetControllers[numControllers] = line;
-      Serial.print("  [");
-      Serial.print(numControllers + 1);
-      Serial.print("] ");
-      Serial.println(line);
-      numControllers++;
-    } else {
-      Serial.print("  Invalid MAC format, skipping: ");
-      Serial.println(line);
+      targetControllers[numControllers++] = line;
     }
   }
-
   file.close();
-
   if (numControllers == 0) {
-    Serial.println("No valid controllers found, using default");
     targetControllers[0] = "b2:3c:44:d1:5a:8e";
     numControllers = 1;
   }
-
   Serial.print("Loaded ");
   Serial.print(numControllers);
-  Serial.println(" controller(s)\n");
+  Serial.println(" controllers");
 }
 
 bool validateMAC(String mac) {
@@ -174,115 +175,59 @@ bool validateMAC(String mac) {
 }
 
 void saveControllersToFile() {
-  if (!LittleFS.begin(true)) {
-    Serial.println("Failed to mount LittleFS, cannot save");
-    return;
-  }
-
+  if (!LittleFS.begin(true)) return;
   File file = LittleFS.open(CONTROLLERS_FILE, "w");
-  if (!file) {
-    Serial.println("Failed to open controllers.txt for writing");
-    return;
-  }
-
-  // Write header comments
-  file.println("# Controller MAC Addresses");
-  file.println("# Add your Bluetooth controller MAC addresses here (one per line)");
-  file.println("# Lines starting with # are comments and will be ignored");
-  file.println("# Format: xx:xx:xx:xx:xx:xx (lowercase letters)");
-  file.println("#");
-  file.println("# To find your controller's MAC address:");
-  file.println("# - Windows: Settings → Bluetooth & devices → Click \"...\" → Properties");
-  file.println("# - macOS: Hold Option, click Bluetooth icon in menu bar");
-  file.println("# - Linux: Run \"bluetoothctl\" and type \"devices\"");
-  file.println("");
-  file.println("# Add your controllers below:");
-
-  // Write all controllers
+  if (!file) return;
   for (int i = 0; i < numControllers; i++) {
     file.println(targetControllers[i]);
   }
-
   file.close();
-  Serial.println(">>> Controllers saved to file");
+  Serial.println("Saved");
 }
 
 void showHelp() {
-  Serial.println("\n=== Controller Management Commands ===");
-  Serial.println("Available commands:");
-  Serial.println("  list                      - Show all configured controllers");
-  Serial.println("  add <mac>                 - Add controller (e.g., add aa:bb:cc:dd:ee:ff)");
-  Serial.println("  remove <mac>              - Remove controller (e.g., remove aa:bb:cc:dd:ee:ff)");
-  Serial.println("  reload                    - Reload controllers from file");
-  Serial.println("  scan <on|off>             - Enable/disable BLE scan debug output");
-  Serial.println("  help                      - Show this help message");
-  Serial.println("");
+  Serial.println("\nCommands: list, add <mac>, remove <mac>, reload, scan <on|off>, help\n");
 }
 
 void listControllers() {
-  Serial.println("\n=== Configured Controllers ===");
+  Serial.println("\nControllers:");
   if (numControllers == 0) {
-    Serial.println("  No controllers configured");
+    Serial.println("None");
   } else {
     for (int i = 0; i < numControllers; i++) {
-      Serial.print("  [");
       Serial.print(i + 1);
-      Serial.print("] ");
+      Serial.print(". ");
       Serial.println(targetControllers[i]);
     }
   }
-  Serial.print("Total: ");
-  Serial.print(numControllers);
-  Serial.print("/");
-  Serial.println(MAX_CONTROLLERS);
-  Serial.println("");
 }
 
 void addController(String mac) {
   mac.toLowerCase();
   mac.trim();
-
-  // Validate MAC format
   if (!validateMAC(mac)) {
-    Serial.print("Invalid MAC address format: ");
-    Serial.println(mac);
-    Serial.println("Expected format: xx:xx:xx:xx:xx:xx (lowercase)");
+    Serial.println("Invalid MAC");
     return;
   }
-
-  // Check if already exists
   for (int i = 0; i < numControllers; i++) {
     if (targetControllers[i] == mac) {
-      Serial.print("Controller already exists: ");
-      Serial.println(mac);
+      Serial.println("Already exists");
       return;
     }
   }
-
-  // Check if list is full
   if (numControllers >= MAX_CONTROLLERS) {
-    Serial.print("Controller list full (");
-    Serial.print(MAX_CONTROLLERS);
-    Serial.println(" max)");
+    Serial.println("List full");
     return;
   }
-
-  // Add controller
-  targetControllers[numControllers] = mac;
-  numControllers++;
-
-  Serial.print(">>> Controller added: ");
+  targetControllers[numControllers++] = mac;
+  Serial.print("Added: ");
   Serial.println(mac);
-
-  // Save to file
   saveControllersToFile();
 }
 
 void removeController(String mac) {
   mac.toLowerCase();
   mac.trim();
-
-  // Find controller in list
   int foundIndex = -1;
   for (int i = 0; i < numControllers; i++) {
     if (targetControllers[i] == mac) {
@@ -290,32 +235,163 @@ void removeController(String mac) {
       break;
     }
   }
-
   if (foundIndex == -1) {
-    Serial.print("Controller not found: ");
-    Serial.println(mac);
+    Serial.println("Not found");
     return;
   }
-
-  // Shift remaining elements left
   for (int i = foundIndex; i < numControllers - 1; i++) {
     targetControllers[i] = targetControllers[i + 1];
   }
-
-  // Clear last element and decrement count
   targetControllers[numControllers - 1] = "";
   numControllers--;
-
-  Serial.print(">>> Controller removed: ");
+  Serial.print("Removed: ");
   Serial.println(mac);
-
-  // Save to file
   saveControllersToFile();
 }
 
 void reloadControllers() {
-  Serial.println(">>> Reloading controllers from file...");
+  Serial.println("Reloading...");
   loadControllersFromFile();
+}
+
+// ========== WiFi Management Functions ==========
+
+bool loadWiFiCredentials() {
+  if (!LittleFS.begin(true)) return false;
+  if (!LittleFS.exists(WIFI_CONFIG_FILE)) return false;
+  File file = LittleFS.open(WIFI_CONFIG_FILE, "r");
+  if (!file) return false;
+
+  StaticJsonDocument<256> doc;
+  DeserializationError error = deserializeJson(doc, file);
+  file.close();
+
+  if (error) return false;
+  wifiSSID = doc["ssid"].as<String>();
+  wifiPassword = doc["password"].as<String>();
+  if (wifiSSID.length() == 0) return false;
+  return true;
+}
+
+bool saveWiFiCredentials(String ssid, String password) {
+  if (!LittleFS.begin(true)) return false;
+  File file = LittleFS.open(WIFI_CONFIG_FILE, "w");
+  if (!file) return false;
+  StaticJsonDocument<256> doc;
+  doc["ssid"] = ssid;
+  doc["password"] = password;
+  if (serializeJson(doc, file) == 0) {
+    file.close();
+    return false;
+  }
+  file.close();
+  return true;
+}
+
+void startAPMode() {
+  WiFi.mode(WIFI_AP);
+  WiFi.softAP(AP_SSID, AP_PASSWORD);
+  IPAddress apIP(192, 168, 4, 1);
+  IPAddress netMask(255, 255, 255, 0);
+  WiFi.softAPConfig(apIP, apIP, netMask);
+  Serial.print("AP: ");
+  Serial.println(AP_SSID);
+  dnsServer.start(DNS_PORT, "*", apIP);
+  apMode = true;
+}
+
+bool connectToWiFi() {
+  if (wifiSSID.length() == 0) return false;
+  Serial.print("WiFi: ");
+  Serial.println(wifiSSID);
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(wifiSSID.c_str(), wifiPassword.c_str());
+  int attempts = 0;
+  while (WiFi.status() != WL_CONNECTED && attempts < 40) {
+    delay(500);
+    Serial.print(".");
+    attempts++;
+  }
+  Serial.println();
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.print("IP: ");
+    Serial.println(WiFi.localIP());
+    apMode = false;
+    return true;
+  } else {
+    Serial.println("WiFi connection failed");
+    return false;
+  }
+}
+
+void checkWiFiConnection() {
+  if (apMode) return;
+
+  unsigned long now = millis();
+  if (now - lastWiFiCheck < WIFI_CHECK_INTERVAL) return;
+  lastWiFiCheck = now;
+
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("WiFi disconnected, attempting reconnect...");
+    connectToWiFi();
+  }
+}
+
+// ========== JSON Helper Functions ==========
+
+void sendJsonResponse(int statusCode, const String& json) {
+  server.send(statusCode, "application/json", json);
+}
+
+void sendJsonError(int statusCode, const String& message) {
+  StaticJsonDocument<128> doc;
+  doc["error"] = message;
+  String json;
+  serializeJson(doc, json);
+  sendJsonResponse(statusCode, json);
+}
+
+void sendJsonSuccess(const String& message) {
+  StaticJsonDocument<128> doc;
+  doc["success"] = true;
+  doc["message"] = message;
+  String json;
+  serializeJson(doc, json);
+  sendJsonResponse(200, json);
+}
+
+String controllersToJson() {
+  DynamicJsonDocument doc(32 + (numControllers * 24));
+  JsonArray array = doc.to<JsonArray>();
+
+  for (int i = 0; i < numControllers; i++) {
+    array.add(targetControllers[i]);
+  }
+
+  String json;
+  serializeJson(doc, json);
+  return json;
+}
+
+String getStatusJson() {
+  StaticJsonDocument<512> doc;
+
+  doc["pcState"] = lastPCState ? "ON" : "OFF";
+  doc["controllerActive"] = controllerCurrentlyActive;
+  doc["numControllers"] = numControllers;
+  doc["maxControllers"] = MAX_CONTROLLERS;
+  doc["scanMode"] = scanMode;
+  doc["wifiMode"] = apMode ? "AP" : "STA";
+  doc["ipAddress"] = apMode ? WiFi.softAPIP().toString() : WiFi.localIP().toString();
+
+  if (controllerCurrentlyActive) {
+    unsigned long timeSince = (millis() - lastControllerSeen) / 1000;
+    doc["lastSeenSeconds"] = timeSince;
+  }
+
+  String json;
+  serializeJson(doc, json);
+  return json;
 }
 
 void handleSerialCommand() {
@@ -391,6 +467,41 @@ void handleSerialCommand() {
   }
 }
 
+// ========== BLE Scan Result Collector ==========
+
+class ScanResultCollector: public BLEAdvertisedDeviceCallbacks {
+  void onResult(BLEAdvertisedDevice advertisedDevice) {
+    if (scanResultCount >= MAX_SCAN_RESULTS) return;
+
+    String address = advertisedDevice.getAddress().toString();
+    address.toLowerCase();
+
+    // Check if already in results
+    for (int i = 0; i < scanResultCount; i++) {
+      if (scanResults[i].mac == address) {
+        return;  // Already have this device
+      }
+    }
+
+    // Check if this is a target controller
+    bool isTarget = false;
+    for (int i = 0; i < numControllers; i++) {
+      if (address == targetControllers[i]) {
+        isTarget = true;
+        break;
+      }
+    }
+
+    // Add to results
+    scanResults[scanResultCount].mac = address;
+    scanResults[scanResultCount].name = advertisedDevice.haveName()
+      ? String(advertisedDevice.getName().c_str())
+      : "Unknown";
+    scanResults[scanResultCount].isTarget = isTarget;
+    scanResultCount++;
+  }
+};
+
 class MyAdvertisedDeviceCallbacks: public BLEAdvertisedDeviceCallbacks {
   void onResult(BLEAdvertisedDevice advertisedDevice) {
     String address = advertisedDevice.getAddress().toString();
@@ -439,23 +550,270 @@ class MyAdvertisedDeviceCallbacks: public BLEAdvertisedDeviceCallbacks {
   }
 };
 
+// ========== REST API Handlers ==========
+
+void handleApiStatus() {
+  sendJsonResponse(200, getStatusJson());
+}
+
+void handleApiGetControllers() {
+  sendJsonResponse(200, controllersToJson());
+}
+
+void handleApiAddController() {
+  if (server.method() != HTTP_POST) {
+    sendJsonError(405, "Method not allowed");
+    return;
+  }
+
+  StaticJsonDocument<128> doc;
+  DeserializationError error = deserializeJson(doc, server.arg("plain"));
+
+  if (error) {
+    sendJsonError(400, "Invalid JSON");
+    return;
+  }
+
+  if (!doc.containsKey("mac")) {
+    sendJsonError(400, "Missing 'mac' field");
+    return;
+  }
+
+  String mac = doc["mac"].as<String>();
+  mac.toLowerCase();
+  mac.trim();
+
+  if (!validateMAC(mac)) {
+    sendJsonError(400, "Invalid MAC address format");
+    return;
+  }
+
+  for (int i = 0; i < numControllers; i++) {
+    if (targetControllers[i] == mac) {
+      sendJsonError(409, "Controller already exists");
+      return;
+    }
+  }
+
+  if (numControllers >= MAX_CONTROLLERS) {
+    sendJsonError(400, "Controller list full");
+    return;
+  }
+
+  targetControllers[numControllers] = mac;
+  numControllers++;
+  saveControllersToFile();
+
+  sendJsonSuccess("Controller added: " + mac);
+}
+
+void handleApiDeleteController() {
+  if (server.method() != HTTP_DELETE) {
+    sendJsonError(405, "Method not allowed");
+    return;
+  }
+
+  // Extract MAC from URI: /api/controllers/aa:bb:cc:dd:ee:ff
+  String uri = server.uri();
+  int lastSlash = uri.lastIndexOf('/');
+  if (lastSlash == -1 || lastSlash == uri.length() - 1) {
+    sendJsonError(400, "Missing MAC address in path");
+    return;
+  }
+
+  String mac = uri.substring(lastSlash + 1);
+  mac.toLowerCase();
+  mac.trim();
+
+  int foundIndex = -1;
+  for (int i = 0; i < numControllers; i++) {
+    if (targetControllers[i] == mac) {
+      foundIndex = i;
+      break;
+    }
+  }
+
+  if (foundIndex == -1) {
+    sendJsonError(404, "Controller not found");
+    return;
+  }
+
+  for (int i = foundIndex; i < numControllers - 1; i++) {
+    targetControllers[i] = targetControllers[i + 1];
+  }
+
+  targetControllers[numControllers - 1] = "";
+  numControllers--;
+  saveControllersToFile();
+
+  sendJsonSuccess("Controller removed: " + mac);
+}
+
+void handleApiReload() {
+  if (server.method() != HTTP_POST) {
+    sendJsonError(405, "Method not allowed");
+    return;
+  }
+
+  loadControllersFromFile();
+  sendJsonSuccess("Controllers reloaded");
+}
+
+void handleApiScan() {
+  scanResultCount = 0;
+
+  BLEScan* tempScan = BLEDevice::getScan();
+  tempScan->setAdvertisedDeviceCallbacks(new ScanResultCollector());
+  tempScan->setActiveScan(true);
+
+  scanInProgress = true;
+  BLEScanResults* foundDevices = tempScan->start(5, false);
+  scanInProgress = false;
+
+  tempScan->clearResults();
+  tempScan->setAdvertisedDeviceCallbacks(new MyAdvertisedDeviceCallbacks());
+
+  DynamicJsonDocument doc(64 + (scanResultCount * 80));
+  JsonArray array = doc.to<JsonArray>();
+
+  for (int i = 0; i < scanResultCount; i++) {
+    JsonObject obj = array.createNestedObject();
+    obj["mac"] = scanResults[i].mac;
+    obj["name"] = scanResults[i].name;
+    obj["isTarget"] = scanResults[i].isTarget;
+  }
+
+  String json;
+  serializeJson(doc, json);
+  sendJsonResponse(200, json);
+}
+
+void handleApiWiFiConfigure() {
+  if (!apMode) {
+    sendJsonError(403, "WiFi configuration only available in AP mode");
+    return;
+  }
+
+  if (server.method() != HTTP_POST) {
+    sendJsonError(405, "Method not allowed");
+    return;
+  }
+
+  StaticJsonDocument<256> doc;
+  DeserializationError error = deserializeJson(doc, server.arg("plain"));
+
+  if (error) {
+    sendJsonError(400, "Invalid JSON");
+    return;
+  }
+
+  if (!doc.containsKey("ssid")) {
+    sendJsonError(400, "Missing 'ssid' field");
+    return;
+  }
+
+  String newSSID = doc["ssid"].as<String>();
+  String newPassword = doc["password"].as<String>();
+
+  if (newSSID.length() == 0) {
+    sendJsonError(400, "SSID cannot be empty");
+    return;
+  }
+
+  if (!saveWiFiCredentials(newSSID, newPassword)) {
+    sendJsonError(500, "Failed to save credentials");
+    return;
+  }
+
+  sendJsonSuccess("WiFi configured - rebooting to connect...");
+
+  delay(2000);
+  ESP.restart();
+}
+
+// ========== HTML Content (PROGMEM) ==========
+
+const char HTML_DASHBOARD[] PROGMEM = R"rawliteral(
+<!DOCTYPE html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>ESP32</title>
+<style>body{font-family:Arial;margin:20px}h2{color:#333}ul{list-style:none;padding:0}
+li{background:#fff;padding:10px;margin:5px 0}input{padding:8px;margin:5px}
+button{padding:8px 12px;background:#2196F3;color:#fff;border:none;cursor:pointer;margin:5px}
+.del{background:#f44}#msg{margin:10px 0}</style></head><body>
+<h2>Controllers</h2><ul id="list"></ul><div><input id="mac" placeholder="aa:bb:cc:dd:ee:ff"><button onclick="add()">Add</button>
+<button onclick="load()">Refresh</button></div><h2>Scan</h2><button onclick="scan()">Scan BLE</button>
+<div id="scan"></div><div id="msg"></div><script>
+async function api(e,t,n){const o={method:t||'GET'};n&&(o.headers={'Content-Type':'application/json'},o.body=JSON.stringify(n));
+return await(await fetch('/api/'+e,o)).json()}
+async function load(){const e=await api('controllers');const t=document.getElementById('list');t.innerHTML='';
+e.forEach(e=>{const n=document.createElement('li');n.innerHTML=e+' <button class=del onclick="del(\''+e+'\')">X</button>';t.appendChild(n)})}
+async function add(){const e=document.getElementById('mac').value.trim().toLowerCase();const t=document.getElementById('msg');
+try{const n=await api('controllers','POST',{mac:e});t.textContent=n.message;document.getElementById('mac').value='';load()}
+catch(e){t.textContent='Error: '+e.message}}
+async function del(e){if(confirm('Remove '+e+'?')){await api('controllers/'+encodeURIComponent(e),'DELETE');load()}}
+async function scan(){const e=document.getElementById('scan');e.innerHTML='Scanning...';const t=await api('scan');e.innerHTML='';
+t.forEach(t=>{const n=document.createElement('div');n.textContent=t.mac+' - '+t.name+(t.isTarget?' [CFG]':'');e.appendChild(n)})}
+load()</script></body></html>
+)rawliteral";
+
+const char HTML_SETUP[] PROGMEM = R"rawliteral(
+<!DOCTYPE html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>WiFi Setup</title>
+<style>body{font-family:Arial;margin:50px auto;max-width:400px}h1{color:#333}input{width:100%;
+padding:10px;margin:10px 0;box-sizing:border-box}button{width:100%;
+padding:12px;background:#2196F3;color:#fff;border:none;cursor:pointer}
+#msg{margin:15px 0;text-align:center}</style></head><body><h1>WiFi Setup</h1><p>Connect to your network:</p>
+<form onsubmit="sub(event)"><input id="ssid" placeholder="Network Name" required><input type="password" id="pass" placeholder="Password">
+<button>Connect</button></form><div id="msg"></div><script>async function sub(e){e.preventDefault();const t=document.getElementById('ssid').value;
+const n=document.getElementById('pass').value;const s=document.getElementById('msg');try{const e=await fetch('/api/wifi/configure',
+{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ssid:t,password:n})});const o=await e.json();
+s.style.color='green';s.textContent=o.message||'Configured! Restarting...'}catch(e){s.style.color='red';s.textContent='Error: '+e.message}}
+</script></body></html>
+)rawliteral";
+
+void handleRoot() {
+  if (apMode) {
+    server.send(200, "text/html", HTML_SETUP);
+  } else {
+    server.send(200, "text/html", HTML_DASHBOARD);
+  }
+}
+
+void handleNotFound() {
+  sendJsonError(404, "Endpoint not found");
+}
+
+void setupWebServer() {
+  server.on("/", HTTP_GET, handleRoot);
+  server.on("/api/status", HTTP_GET, handleApiStatus);
+  server.on("/api/controllers", HTTP_GET, handleApiGetControllers);
+  server.on("/api/controllers", HTTP_POST, handleApiAddController);
+  server.on("/api/reload", HTTP_POST, handleApiReload);
+  server.on("/api/scan", HTTP_GET, handleApiScan);
+  server.on("/api/wifi/configure", HTTP_POST, handleApiWiFiConfigure);
+
+  // Custom handler for DELETE /api/controllers/{mac}
+  server.onNotFound([]() {
+    String uri = server.uri();
+    if (server.method() == HTTP_DELETE && uri.startsWith("/api/controllers/")) {
+      handleApiDeleteController();
+    } else {
+      handleNotFound();
+    }
+  });
+
+  server.begin();
+  Serial.println("Web server started");
+}
+
 void setup() {
   Serial.begin(115200);
   delay(2000);
-
   pinMode(POWER_PIN, INPUT);
   pinMode(PC_STATUS_PIN, INPUT);
-
-  Serial.println("=== PC Wake/Sleep Controller with Status Detection ===");
-
-  // Load controller list from file
+  Serial.println("\nESP32 PC Controller");
   loadControllersFromFile();
-
-  // Check initial PC state
-  bool pcOn = isPCOn();
-  Serial.print("Initial PC state: ");
-  Serial.println(pcOn ? "ON" : "OFF/SLEEP");
-  lastPCState = pcOn;
+  lastPCState = isPCOn();
+  Serial.print("PC: ");
+  Serial.println(lastPCState ? "ON" : "OFF");
 
   BLEDevice::init("");
   pBLEScan = BLEDevice::getScan();
@@ -466,10 +824,22 @@ void setup() {
 
   lastControllerSeen = millis();
 
-  Serial.println("\nType 'help' for controller management commands\n");
+  // Initialize WiFi
+  if (loadWiFiCredentials()) {
+    if (!connectToWiFi()) startAPMode();
+  } else {
+    startAPMode();
+  }
+  setupWebServer();
+  Serial.println("\nType 'help' for commands");
 }
 
 void loop() {
+  // Handle web server and WiFi
+  server.handleClient();           // Handle HTTP requests
+  if (apMode) dnsServer.processNextRequest();  // Captive portal
+  if (!apMode) checkWiFiConnection();          // Auto-reconnect
+
   // Check for serial commands (non-blocking)
   handleSerialCommand();
 
@@ -500,26 +870,10 @@ void loop() {
   
   // Check inactivity timeout
   if (controllerCurrentlyActive && timeSinceLastSeen > INACTIVITY_TIMEOUT) {
-    Serial.println("Controller inactive for 2+ minutes");
+    Serial.println("Inactive timeout");
     sleepPC();
     controllerCurrentlyActive = false;
   }
-  
-  // Debug output
-  static unsigned long lastDebugPrint = 0;
-  if (now - lastDebugPrint > 30000) {
-    Serial.print("Status - PC: ");
-    Serial.print(lastPCState ? "ON" : "OFF");
-    Serial.print(", Controller: ");
-    if (controllerCurrentlyActive) {
-      Serial.print("Active (last seen ");
-      Serial.print(timeSinceLastSeen / 1000);
-      Serial.println("s ago)");
-    } else {
-      Serial.println("Inactive");
-    }
-    lastDebugPrint = now;
-  }
-  
+
   delay(500);
 }
