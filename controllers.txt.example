@@ -1,0 +1,14 @@
+# Controller MAC Addresses
+# Add your Bluetooth controller MAC addresses here (one per line)
+# Lines starting with # are comments and will be ignored
+# Format: xx:xx:xx:xx:xx:xx (lowercase letters)
+#
+# To find your controller's MAC address:
+# - Windows: Settings → Bluetooth & devices → Click "..." → Properties
+# - macOS: Hold Option, click Bluetooth icon in menu bar
+# - Linux: Run "bluetoothctl" and type "devices"
+
+# Example controllers (replace with your own):
+b2:3c:44:d1:5a:8e
+# a4:5e:60:c8:2b:1f
+# c8:7f:54:a2:9b:3d
